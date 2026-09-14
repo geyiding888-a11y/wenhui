@@ -32,6 +32,7 @@ for _stream in (sys.stdout, sys.stderr):
 import streamlit as st  # noqa: E402
 
 from wenhui import pipeline  # noqa: E402
+from wenhui.agent.ui import render_ask_panel  # noqa: E402
 from wenhui.config import (  # noqa: E402
     INBOX_DIR,
     OUTPUT_DIR,
@@ -403,7 +404,12 @@ def render_workspace(settings) -> None:
 
         bar.empty()
         st.session_state["result"] = result
-        st.success("汇总完成")
+        # 重画一次。**这一下不是多余的**：上面那块对话区是在这之前画的，
+        # 那一刻它还没看到新结果，会显示"还没有可查的数据"——
+        # 于是同一屏上，上面说没数据、下面把结果画得满满的，自相矛盾。
+        # 用已有的 upload_notice 套路把"汇总完成"这句话带到重画之后。
+        st.session_state["upload_notice"] = "汇总完成，现在可以在上面提问了。"
+        st.rerun()
 
     result = st.session_state.get("result")
     if result is not None:
@@ -520,6 +526,9 @@ def main() -> None:
             for col, symbol, title, detail in zip(cols, ["▤", "⌘", "◎", "▱"], ["表格汇总", "智能对齐", "问题检查", "资料归档"], ["多份表格一键合并", "识别不同列名含义", "定位漏填与重复项", "下载与追溯结果"]):
                 col.markdown(f'<div class="feature"><span>{symbol}</span><b>{title}</b><small>{detail}</small></div>', unsafe_allow_html=True)
             st.markdown('<div class="assistant-note"><span>◈</span><div><b>资料整理，从这里开始</b><p>在右侧添加 Excel，点击「开始汇总」。我会整理表格，并列出需要你确认的地方。</p></div></div>', unsafe_allow_html=True)
+            # ★ 必须在 render_workspace **之前**：收件箱为空时它会 st.stop()，
+            #   把后面所有渲染掐掉——排它后面的话，收件箱一空对话框就"消失"。
+            render_ask_panel(settings, get_store())
             with st.container(border=True):
                 st.subheader("任务执行记录")
                 st.caption("① 读取资料　 →　 ② 对齐与检查　 →　 ③ 生成总表")

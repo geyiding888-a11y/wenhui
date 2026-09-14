@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS runs (
     n_issues    INTEGER NOT NULL DEFAULT 0,
     cost_cny    REAL NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS query_usage (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    asked_at    TEXT NOT NULL,
+    question    TEXT NOT NULL DEFAULT '',
+    cost_cny    REAL NOT NULL DEFAULT 0,
+    n_turns     INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -226,3 +234,48 @@ class Store:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT COALESCE(SUM(cost_cny), 0) AS total FROM runs").fetchone()
             return float(row["total"])
+
+    # ---------------------------------------------------------------- 问答花费
+
+    def record_query(self, question: str, cost_cny: float, n_turns: int = 0) -> int:
+        """记一次提问的花费。
+
+        **为什么不塞进 ``runs`` 表**：``runs`` 是"一次汇总"的语义
+        （有 ``n_files`` / ``n_records`` 这些字段）。一次提问既没有文件数
+        也没有记录条数，硬塞进去会让"累计花费"这个数字说不清是哪来的——
+        用户在侧边栏看到"累计花费 ¥3.2"，没法判断是汇总花的还是聊天花的。
+
+        单独一张表，就能分开显示"汇总累计 ¥x / 问答累计 ¥y"。
+        顺带也解释了那个 bug：以前 agent 的花销**根本没进过账**，
+        问了 20 个问题，这里也不会有任何记录。
+
+        :param question: 用户问的那句话。**存之前要截断**——用户可能
+            粘贴一大段文字进来，没必要整个存下来。
+        :returns: 新记录的行号。
+        """
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                "INSERT INTO query_usage (asked_at, question, cost_cny, n_turns) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    datetime.now().isoformat(timespec="seconds"),
+                    question.strip()[:200],
+                    float(cost_cny),
+                    int(n_turns),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def query_cost(self) -> float:
+        """问答功能的累计花费。和 :meth:`total_cost`（汇总累计）分开算。"""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cost_cny), 0) AS total FROM query_usage"
+            ).fetchone()
+            return float(row["total"])
+
+    def n_queries(self) -> int:
+        """一共问过几次。"""
+        with closing(self._connect()) as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM query_usage").fetchone()[0])

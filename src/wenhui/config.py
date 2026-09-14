@@ -79,11 +79,54 @@ class ExcelSettings:
 
 
 @dataclass(frozen=True)
+class AgentSettings:
+    """对话框（问数助手）的设置。
+
+    这些开关只管**问答**那一个功能，不影响汇总流水线。
+    """
+
+    #: 不想要对话框就改成 false，界面上那一块会整块消失。
+    enabled: bool = True
+    #: 一次提问最多让模型来回几轮（它可能要查好几次才答得上来）。
+    #: 上限的作用是**防转圈烧钱**：模型偶尔会陷进"查一次不满意再查一次"，
+    #: 没有上限的话它会一直试下去。
+    max_turns: int = 6
+    #: 查询结果最多回传多少行给模型。
+    #: 超过的部分只告诉它"一共多少行"，不把全部内容发出去——
+    #: 既省 token，也少往外发数据。
+    result_rows_for_ai: int = 20
+    #: 给模型看的每列样本个数。给 0 也行（只看列名它就能写查询），
+    #: 但给两三个能让它更清楚这列是"数字"还是"文字"。
+    samples_per_column: int = 3
+    #: 要不要把**姓名**也打码。**默认不打（false）**，理由：
+    #: 打码了"张三有多少学生"这类问题就永远答不出来，而这个功能的价值
+    #: 一大半就在这儿。而且现有汇总流程本来就会把姓名样本发给模型
+    #: （对齐列名时），这里不打码并没有**新增**泄露面。
+    #:
+    #: 但确实变了：以前模型只看得到"列名 + 几个打码样本"，
+    #: 现在它会看到查询结果里一行行的真实姓名。**介意就改成 true**——
+    #: 改完成绩单那类问题照样能答，只是回答里的人都变成"张*"。
+    mask_name_in_answer: bool = False
+
+    #: 问答的累计花费上限（元）。0 表示不限制。
+    #:
+    #: **为什么问答要单独一个上限，不跟汇总共用一个**：两者的花法完全不同。
+    #: 汇总是"点一次花一笔"，一次几毛钱，你心里有数；问答是"打一句话花一点"，
+    #: 一次几分钱，但**可以问一百次**。共用一个额度的话，你问着问着
+    #: 突然发现汇总跑不了了，而且说不清钱花在哪。
+    #:
+    #: 这个数是**累计**的（存在数据库里，关掉程序再打开也还算数），
+    #: 不是"每问一次给这么多"。
+    cost_limit_cny: float = 2.0
+
+
+@dataclass(frozen=True)
 class Settings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     aggregate: AggregateSettings = field(default_factory=AggregateSettings)
     privacy: PrivacySettings = field(default_factory=PrivacySettings)
     excel: ExcelSettings = field(default_factory=ExcelSettings)
+    agent: AgentSettings = field(default_factory=AgentSettings)
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -141,7 +184,25 @@ def load_settings(path: Path | None = None) -> Settings:
         treat_as_empty=tuple(excel_raw.get("treat_as_empty", ExcelSettings.treat_as_empty)),
     )
 
-    return Settings(llm=llm, aggregate=aggregate, privacy=privacy, excel=excel)
+    agent_raw = section("agent")
+    agent = AgentSettings(
+        enabled=bool(agent_raw.get("enabled", AgentSettings.enabled)),
+        max_turns=int(agent_raw.get("max_turns", AgentSettings.max_turns)),
+        result_rows_for_ai=int(
+            agent_raw.get("result_rows_for_ai", AgentSettings.result_rows_for_ai)
+        ),
+        samples_per_column=int(
+            agent_raw.get("samples_per_column", AgentSettings.samples_per_column)
+        ),
+        mask_name_in_answer=bool(
+            agent_raw.get("mask_name_in_answer", AgentSettings.mask_name_in_answer)
+        ),
+        cost_limit_cny=float(
+            agent_raw.get("cost_limit_cny", AgentSettings.cost_limit_cny)
+        ),
+    )
+
+    return Settings(llm=llm, aggregate=aggregate, privacy=privacy, excel=excel, agent=agent)
 
 
 # --------------------------------------------------------------------------

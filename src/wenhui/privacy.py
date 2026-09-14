@@ -23,6 +23,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # 只在做类型检查时导入 —— 运行时不导入，避免底层模块反向依赖上层
+    from .config import PrivacySettings
 
 # 18 位身份证：6 位地址 + 8 位生日 + 3 位顺序 + 1 位校验（可为 X）
 # 15 位是旧版，仍有人用
@@ -80,10 +85,40 @@ _MASKERS = (
 )
 
 
+def enabled_masks(privacy: "PrivacySettings") -> set[str]:
+    """把 ``settings.toml`` 里那四个开关，翻译成"要启用哪几条规则"的名字集合。
+
+    **这个函数存在的唯一理由，是别再让第四个地方手抄一遍这四个开关。**
+
+    以前 ``pipeline.preview_masked`` 手抄了一份，``excel/mapper.py`` 干脆
+    忘了传——后果是 settings.toml 里那四个开关**实际上是失效的**：
+    界面上显示"已打码"，实际按全开处理。这种"开关点了没用"的不一致
+    最难查，因为两边看起来都对。
+
+    谁要脱敏，都从这里拿集合。
+
+    :param privacy: ``config.PrivacySettings``。用字符串标注类型而不是直接
+        写类名，是为了让这个模块**不依赖 config**——它在最底层，
+        不该反过来知道上层的东西。
+    """
+    return {
+        name
+        for name, on in (
+            ("mask_id_card", privacy.mask_id_card),
+            ("mask_phone", privacy.mask_phone),
+            ("mask_bank_card", privacy.mask_bank_card),
+            ("mask_email", privacy.mask_email),
+        )
+        if on
+    }
+
+
 def mask_text(text: str, enabled: Iterable[str] | None = None) -> str:
     """对一段文本做全部脱敏。
 
     :param enabled: 要启用的规则名集合；``None`` 表示全部启用。
+        **新代码请传 ``enabled_masks(settings.privacy)``**，
+        别传 ``None``——传 ``None`` 等于无视用户关掉的开关。
     """
     if not text:
         return text

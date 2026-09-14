@@ -46,7 +46,7 @@ from .excel.reader import ExcelReadError, SheetData, read_workbook
 from .excel.validator import Issue, Record, validate
 from .excel.writer import default_output_paths, write_issues, write_summary
 from .llm import LLMClient
-from .privacy import mask_text
+from .privacy import enabled_masks, mask_text
 from .store import Store, signature_of
 
 #: 进度回调：``(说明文字, 0~1 的进度)``
@@ -360,6 +360,7 @@ def run(
             cached=cached_mapping,
             cache_source=cached_source,
             cached_confidence=cached_entry.confidence if cached_entry else None,
+            privacy=settings.privacy,
         )
 
         if mapping.error and client is not None:
@@ -582,18 +583,13 @@ def rewrite_issues(result: PipelineResult, store: Store | None = None) -> None:
 
 
 def preview_masked(text: str, privacy: PrivacySettings) -> str:
-    """给界面用：展示"这句话发给 AI 之后长什么样"，让用户亲眼看到脱敏效果。"""
-    enabled = {
-        name
-        for name, on in (
-            ("mask_id_card", privacy.mask_id_card),
-            ("mask_phone", privacy.mask_phone),
-            ("mask_bank_card", privacy.mask_bank_card),
-            ("mask_email", privacy.mask_email),
-        )
-        if on
-    }
-    return mask_text(text, enabled)
+    """给界面用：展示"这句话发给 AI 之后长什么样"，让用户亲眼看到脱敏效果。
+
+    用的是和真正发送时**同一个** :func:`enabled_masks`。
+    自己再抄一遍开关的话，早晚抄漏一个——那后果是预览里显示"已打码"，
+    实际发出去的却是原文。**预览和实际必须是同一条路。**
+    """
+    return mask_text(text, enabled_masks(privacy))
 
 
 __all__ = [

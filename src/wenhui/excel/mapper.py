@@ -36,9 +36,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, create_model
 
-from ..config import AggregateSettings
+from ..config import AggregateSettings, PrivacySettings
 from ..llm import LLMClient, LLMError
-from ..privacy import build_masked_samples
+from ..privacy import build_masked_samples, enabled_masks
 from .field_kinds import is_group_field
 from .reader import ColumnInfo, SheetData
 
@@ -353,6 +353,7 @@ def map_sheet(
     cached: dict[str, str | None] | None = None,
     cache_source: str = "cache",
     cached_confidence: dict[str, float] | None = None,
+    privacy: PrivacySettings | None = None,
 ) -> MappingResult:
     """给一份表的列做对齐。
 
@@ -360,6 +361,9 @@ def map_sheet(
     :param cached: 已经命中的缓存映射，传了就不再调模型
     :param cached_confidence: 缓存里那一列当初的把握程度。**不能省**——
         忘了它，"上次没把握"的列就会被当成"确定无疑"，再也不会提醒用户。
+    :param privacy: 脱敏开关。**以前这个参数不存在，后果是
+        ``settings.toml`` 里那四个开关形同虚设**——程序按"全部开启"处理，
+        界面上却显示"已按你的设置打码"。不传相当于全开。
     """
     source_columns = [c.name for c in sheet.columns]
     result = MappingResult(source=cache_source)
@@ -388,7 +392,13 @@ def map_sheet(
 
     # 只把"打了码的几个样本"发出去——真实数据不出门
     masked = {
-        col.name: build_masked_samples(col.samples, settings.samples_per_column)
+        col.name: build_masked_samples(
+            col.samples,
+            settings.samples_per_column,
+            # privacy 没传 = 全部打码（保守的那一边）。
+            # 宁可多打一点，也不能因为少传一个参数就把真号码发出去。
+            enabled_masks(privacy) if privacy is not None else None,
+        )
         for col in sheet.columns
     }
     prompt = build_prompt(sheet.columns, target_fields, field_samples or {}, masked)

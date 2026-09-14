@@ -115,11 +115,23 @@ class Usage:
 
     def add_call(self, message: object) -> None:
         """从 LangChain 的 AIMessage 里取 token 用量。取不到就只记次数。"""
+        self.add_metadata(getattr(message, "usage_metadata", None))
+
+    def add_metadata(self, metadata: object) -> None:
+        """直接拿一份 ``usage_metadata`` 记账。
+
+        **为什么不复用 ``add_call``**：问数助手那条路拿到的常常是
+        「一个 ``AIMessage``」而不是「一个带 ``usage_metadata`` 属性的对象」——
+        比如从流式输出里逐块收集、或者从字典里还原出来的。
+        两边各写一遍取 token 的代码，早晚有一边忘了加 cache token 之类的字段。
+
+        取不到用量也照样把次数 +1：**"调了一次但没拿到用量"和"没调过"
+        是两件事**，前者要能被看见（费用可能被低估），后者不用管。
+        """
         self.calls += 1
-        meta = getattr(message, "usage_metadata", None)
-        if isinstance(meta, dict):
-            self.input_tokens += int(meta.get("input_tokens") or 0)
-            self.output_tokens += int(meta.get("output_tokens") or 0)
+        if isinstance(metadata, dict):
+            self.input_tokens += int(metadata.get("input_tokens") or 0)
+            self.output_tokens += int(metadata.get("output_tokens") or 0)
 
     def cost_cny(self, model: str) -> float:
         rate_in, rate_out = PRICES_CNY_PER_MTOK.get(model, _FALLBACK_PRICE)
@@ -270,6 +282,57 @@ class LLMClient:
         raise LLMError(
             "结构化输出失败，几种方式都不行：\n  " + "\n  ".join(errors)
         )
+
+    # ------------------------------------------------------------------ 记账
+
+    def record_usage(self, message: object) -> bool:
+        """把问数助手里**一轮对话**的花销记进账。返回是否真的记上了一笔。
+
+        **这个方法存在的理由**：``structured()`` 是唯一会调 ``add_call``
+        的地方（本文件 :meth:`add_metadata` 的上游），而问数助手走的是
+        ``client.model``，直接绕过了 ``structured``。后果是——跑了四轮对话，
+        右下角"本次花费"仍然是 **0**。用户看着 0 会以为不要钱，
+        然后放心地一直问下去。
+
+        :param message: ``AIMessage``，或者一份 ``usage_metadata`` 字典。
+        :returns: 拿到用量返回 ``True``；这条消息里没有用量信息返回 ``False``。
+            **调用方要能区分这两种情况**：没拿到说明费用被低估了，
+            该提示用户，而不是当成"这次没花钱"。
+
+        **不管哪种情况，"调了一次"这件事都会被记上**（和
+        :meth:`Usage.add_metadata` 的契约一致）。这两件事必须分开：
+
+        - **次数**：调了就是调了。漏记的话，"调用模型 N 次"会少报，
+          而且从账上完全看不出少报过。
+        - **金额**：拿不到用量就是算不出来，只能用 ``False`` 让调用方
+          知道"这个数字偏小"。
+
+        一开始这里是"没用量就整个不记"，等于把没拿到用量的那几次调用
+        从账上抹掉了——**账面上看是"没花钱"，实际是"不知道花了多少"**。
+        """
+        meta = message if isinstance(message, dict) else getattr(message, "usage_metadata", None)
+        if not isinstance(meta, dict) or not meta:
+            self.usage.add_metadata(None)   # 次数 +1，金额不动
+            return False
+        self.usage.add_metadata(meta)
+        return True
+
+    def record_failure(self) -> None:
+        """记一次失败。界面上要能看出"这次不顺"，而不是只看到一个总花费。"""
+        self.usage.failures += 1
+
+    def cost_so_far(self) -> float:
+        """到目前为止花了多少（估算，元）。"""
+        return self.usage.cost_cny(self.settings.model)
+
+    def check_budget(self) -> None:
+        """超预算就抛 ``BudgetExceeded``。
+
+        :meth:`_check_budget` 是给 ``structured`` 内部用的私有版本；
+        问数助手要在**每一轮对话开始前**自己调一次——它绕过 ``structured``，
+        不自己查的话，限额对它完全不起作用，用户设的 5 块钱上限形同虚设。
+        """
+        self._check_budget()
 
     def _check_budget(self) -> None:
         if self.cost_limit_cny <= 0:

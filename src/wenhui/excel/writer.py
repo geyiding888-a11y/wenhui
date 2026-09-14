@@ -49,8 +49,14 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _MAX_COL_WIDTH = 42
 _MIN_COL_WIDTH = 8
 
-#: 汇总表末尾附带的溯源列（灰色，可删）
-_AUX_HEADERS = ("来源文件", "来源行")
+#: 汇总表末尾附带的溯源列（灰色，可删）。
+#: **公开的**：问数助手建查询表时要用同一份列名——
+#: 你在 Excel 里看到的列名，和它眼里的一模一样，这样你说"来源文件"
+#: 的时候它才认得。两处各写一份的话，早晚改了一边忘了另一边。
+AUX_HEADERS = ("来源文件", "来源行")
+
+#: 旧名，留个别处引用不到时炸掉。新代码用 :data:`AUX_HEADERS`。
+_AUX_HEADERS = AUX_HEADERS
 
 
 def _cell_value(value: object) -> object:
