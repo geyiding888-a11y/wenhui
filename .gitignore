@@ -1,0 +1,28 @@
+# ---- 运行环境 ----
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ---- 业务数据（含个人信息，绝不入库） ----
+收件箱/*
+!收件箱/.gitkeep
+模板/*
+!模板/.gitkeep
+输出/*
+!输出/.gitkeep
+data/
+*.db
+*.sqlite3
+
+# ---- 密钥：任何形式都不允许出现 ----
+.env
+.env.*
+!.env.example
+*.key
+secrets.*
+
+# ---- 系统杂项 ----
+.DS_Store
+Thumbs.db
+~$*.xlsx

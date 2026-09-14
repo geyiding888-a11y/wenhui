@@ -1,0 +1,38 @@
+[project]
+name = "wenhui"
+version = "0.1.0"
+description = "文汇 · 高校材料汇总系统 —— 把 N 份格式不一的下级 Excel 自动合并成一张总表"
+readme = "read.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # AI 层：用户指定 LangChain；langchain-openai 可直连任何 OpenAI 兼容端点
+    "langchain>=1.1",
+    "langchain-openai>=1.1",
+    # Excel 层：openpyxl 读合并单元格结构，calamine 容错读 .xls。
+    # 刻意不装 pandas：合并逻辑用纯 Python 写更快也更可控，
+    # 而 pandas 3.0 是破坏性大版本（写时复制、字符串 dtype 都变了）。
+    # 少一个会变的大依赖，就少一类"装不上/跑不通"。
+    "openpyxl>=3.1",
+    "python-calamine>=0.3",
+    # 界面层
+    "streamlit>=1.40",
+    # 结构化输出与配置
+    "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wenhui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["ignore::DeprecationWarning"]

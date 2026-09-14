@@ -1,0 +1,32 @@
+# Streamlit（界面程序）的设置。一般不用改。
+
+[server]
+# 启动后自动打开浏览器。改成 true 就只启动、不开浏览器。
+headless = false
+
+# ⚠️ 这一项**必须有，别删**。
+# Streamlit 第一次运行时会弹一个英文提示要你输邮箱——双击启动的老师
+# 看到一个黑框里冒出英文，多半直接关掉窗口，程序就这么"一闪而过"了。
+# 控制这个弹窗的是 server.showEmailPrompt，不是 browser.gatherUsageStats
+#（后者只管要不要上报使用数据，管不着弹窗）。
+showEmailPrompt = false
+
+# 关掉"文件变化自动重载"。这是给开发者用的功能，
+# 对你只有坏处：偶尔会自己重启、把正在跑的汇总打断。
+fileWatcherType = "none"
+
+# 不向 Streamlit 官方上报使用数据。
+# 这个项目处理的是学校内部数据，能少往外发一点就少发一点。
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#216b48"
+backgroundColor = "#fcfdfd"
+secondaryBackgroundColor = "#f1f5f2"
+textColor = "#192321"
+
+[client]
+# 上传/下载大文件时不弹警告
+showErrorDetails = true
