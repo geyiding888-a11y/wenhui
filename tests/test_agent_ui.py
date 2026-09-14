@@ -65,12 +65,20 @@ def _isolate(tmp_path):
     ``_run`` 之后又点一次按钮（比如点例子按钮），那次重画同样要
     ``get_store()``——而缓存里那个 Store 还指着已经删掉的目录，
     会报 ``unable to open database file``。
+
+    **三、给一个假密钥。** 这些测试验的是"界面画得出来吗""卡片上写了什么"，
+    跟用户本机有没有配密钥毫无关系。不铺这一层的话，它们会**偷偷依赖
+    跑测试的这台机器设了 ``LLM_API_KEY``**——在你机器上是绿的，
+    换台机器（或者哪天你把密钥清了）就莫名其妙红一片，
+    而报错信息完全指不到真正的原因。
     """
     st.cache_resource.clear()
     st.cache_data.clear()
     with patch(
         "wenhui.store.Store", return_value=Store(tmp_path / "t.db")
-    ), patch("wenhui.config.OUTPUT_DIR", tmp_path):
+    ), patch("wenhui.config.OUTPUT_DIR", tmp_path), patch(
+        "wenhui.agent.ui.get_api_key", return_value="sk-测试用的假密钥"
+    ):
         yield
     st.cache_resource.clear()
     st.cache_data.clear()
@@ -87,6 +95,34 @@ def _result():
         ],
         run_id=1,
     )
+
+
+def _pending_entry(reason="用户明确要求重新汇总"):
+    """一条"助手停下来等点头"的对话记录，形状和 ``_entry_of`` 造出来的完全一致。"""
+    return {
+        "role": "assistant", "text": "", "error": "", "uncounted": False,
+        "runs": [], "cost": 0.001,
+        "pending": [{
+            "name": "rerun_merge",
+            "args": {"reason": reason},
+            "description": "助手想重新汇总一遍收件箱里的表。",
+        }],
+    }
+
+
+def _captions(at) -> list[str]:
+    """把界面上**所有**说明文字收集起来——气泡里的和气泡外的都要。
+
+    两种都存在，而 ``at.caption``（顶层那个）**只抓得到气泡外面的**：
+    卡片上的报价、"它给的理由"都在 ``st.chat_message`` 里面，它一个都看不见。
+    反过来，面板级的那句"上面那件事还没答复"又在气泡外面。
+
+    只取一边的话，测试会写成"什么都没找到"——看着像功能坏了，
+    其实是找错了地方。所以两边都收。
+    """
+    return [c.value for c in at.caption] + [
+        c.value for msg in at.chat_message for c in msg.caption
+    ]
 
 
 def _run(**session):
@@ -165,11 +201,11 @@ def test_有对话记录时整个界面能画出来():
     at = _run(result=_result(), **{_KEY_HISTORY: [
         {"role": "user", "text": "指导学生最多的是谁？"},
         {"role": "assistant", "text": "最多的是张三。", "error": "",
-         "uncounted": False, "runs": runs, "cost": 0.001},
+         "uncounted": False, "runs": runs, "cost": 0.001, "pending": []},
         {"role": "assistant", "text": "", "error": "AI 现在连不上。",
-         "uncounted": False, "runs": [], "cost": 0.0},
+         "uncounted": False, "runs": [], "cost": 0.0, "pending": []},
         {"role": "assistant", "text": "一共 900 条。", "error": "",
-         "uncounted": True, "runs": [], "cost": 0.002},
+         "uncounted": True, "runs": [], "cost": 0.002, "pending": []},
     ]})
 
     assert not at.exception
@@ -197,6 +233,143 @@ def test_查询失败的那一次不会把界面搞崩():
     ]})
     assert not at.exception
     assert any("没跑通" in c.value for msg in at.chat_message for c in msg.caption)
+
+
+# --------------------------------------------------------------------------
+# "等你点头"那张卡片
+# --------------------------------------------------------------------------
+
+def test_等你点头的卡片能画出来():
+    """**"动手先问"在界面上的那一半。**
+
+    塞一条"助手停下来等答复"的记录进去，看整个应用能不能画出来、
+    两个按钮在不在、它给的理由有没有原话显示。
+    """
+    at = _run(result=_result(), **{_KEY_HISTORY: [
+        {"role": "user", "text": "帮我重新汇总一下"},
+        _pending_entry(),
+    ]})
+
+    assert not at.exception
+    labels = [b.label for b in at.button]
+    assert "好，照做" in labels
+    assert "先别动" in labels
+    # 它给的理由必须**原话**显示——用户是靠这句话决定点不点的。
+    # 换成一句模板话（"助手想执行一个操作"），那个"照做"按钮就变成了摆设。
+    assert any("用户明确要求重新汇总" in c for c in _captions(at))
+
+
+def test_等你点头时不给再问新问题():
+    """还有没答复的动作时，把输入框收起来。
+
+    记忆里还存着上一次没走完的中断，这时候再问一句，新问题会跟它搅在一起——
+    最后那个回答到底在回答哪一句，谁都说不清。还不如把话说白。
+    """
+    at = _run(result=_result(), **{_KEY_HISTORY: [_pending_entry()]})
+    assert not at.exception
+    assert "想问什么？" not in [t.label for t in at.text_input]
+    assert any("还没答复" in c for c in _captions(at))
+
+
+def test_答复完卡片就没了输入框回来():
+    """反过来的那一半：卡片摘掉之后，得能接着问话。
+
+    少了这一条，界面可能"卡在等答复"上再也出不来——而用户什么都做不了。
+    """
+    at = _run(result=_result(), **{_KEY_HISTORY: [
+        {"role": "user", "text": "帮我重新汇总一下"},
+        # 已经答复过的那条：pending 是空的
+        {"role": "assistant", "text": "好的，那就不动了。", "error": "",
+         "uncounted": False, "runs": [], "cost": 0.001, "pending": []},
+    ]})
+    assert not at.exception
+    assert "想问什么？" in [t.label for t in at.text_input]
+    assert "先别动" not in [b.label for b in at.button]
+
+
+def test_不花钱试跑时卡片上说清楚不要钱():
+    """用户上次勾了"不花钱试跑"，卡片就得说"这次不花钱"。
+
+    **这一条和下面那条是一对，缺一不可。** 只测"要花钱"的话，
+    代码可能变成"永远都警告要花钱"，用户被吓多了就再也不点那个按钮了。
+    """
+    at = _run(result=_result(), last_dry_run=True,
+              **{_KEY_HISTORY: [_pending_entry()]})
+    assert not at.exception
+    assert any("不花钱试跑" in c for c in _captions(at))
+    assert not any("会产生费用" in c for c in _captions(at))
+
+
+def test_要花钱时卡片上会报价(tmp_path):
+    """**这一条是"闭着眼睛签字"的正解。**
+
+    用户看到的只有两个按钮。卡片上不报价的话，那个「好，照做」
+    就是在让他为一个不知道多少钱的动作签字。
+    """
+    store = Store(tmp_path / "t.db")     # 和 _isolate 里是同一个库文件
+    run_id = store.start_run(3)
+    store.finish_run(run_id, 900, 2, 0.0050)
+
+    at = _run(result=_result(), last_dry_run=False,
+              **{_KEY_HISTORY: [_pending_entry()]})
+
+    assert not at.exception
+    captions = _captions(at)
+    assert any("会产生费用" in c for c in captions)
+    assert any("0.0050" in c for c in captions), "报了价但没说是多少钱"
+    assert any("3 个文件" in c for c in captions), "没说这个价是按几个文件估的"
+
+
+def test_点了按钮却没走成时不会把用户卡死(tmp_path):
+    """**"出不来"那个死角。**
+
+    助手停下来等人点头的时候，"它还停在那儿"这件事记在**记忆**里。
+    要是那件事最后没走成（没密钥、超预算、网断了），卡片被摘掉了、
+    记忆里却还卡着那个中断——接下来每一句提问都会被"上一件事还没答复"
+    挡回去，而屏幕上**已经没有按钮可点了**。用户就此卡死，只能重启程序。
+
+    这里用"超预算"造出这个局面（它不联网，结果是确定的）。
+    """
+    store = Store(tmp_path / "t.db")
+    store.record_query("之前问过的", 9999.0, n_turns=1)   # 先把额度花穿
+
+    at = _run(
+        result=_result(),
+        last_dry_run=True,
+        **{
+            "ask_memory": "假装这里有一份记忆",
+            _KEY_HISTORY: [_pending_entry()],
+        },
+    )
+    at.button(key="ask-stop-0").click().run()
+
+    assert not at.exception
+    # 为什么没走成，得说清楚——不能只是"按钮点了没反应"
+    assert any("上限" in e.value for e in at.error)
+    # ★ 记忆必须被丢掉，否则用户永远卡在"先答复上面那件事"上
+    assert "ask_memory" not in at.session_state, "中断还卡在记忆里，用户出不来了"
+    # 卡片摘掉了，输入框回来
+    assert "先别动" not in [b.label for b in at.button]
+
+
+def test_没跑过花钱的汇总时不编一个价格(tmp_path):
+    """"不花钱试跑"也会在库里留一行，但花费是 0。
+
+    不过滤的话，卡片上会写"上次花了 ¥0.0000"——**报了一个假数**，
+    比不报还糟：用户会以为重跑是免费的。
+    """
+    store = Store(tmp_path / "t.db")
+    run_id = store.start_run(3)
+    store.finish_run(run_id, 900, 2, 0.0)      # 试跑，花费 0
+
+    at = _run(result=_result(), last_dry_run=False,
+              **{_KEY_HISTORY: [_pending_entry()]})
+
+    assert not at.exception
+    captions = _captions(at)
+    assert any("会产生费用" in c for c in captions)
+    assert any("说不准" in c for c in captions), "没历史就该直说说不准"
+    assert not any("0.0000" in c for c in captions), "把试跑那次的 0 元当成了报价"
 
 
 # --------------------------------------------------------------------------

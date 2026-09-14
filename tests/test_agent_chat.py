@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 
+from wenhui.agent.actions import RERUN_TOOL_NAME, ActionSink
 from wenhui.agent.chat import (
     NO_GUESSING_RULE,
     AskOutcome,
@@ -29,6 +30,7 @@ from wenhui.agent.chat import (
     ask,
     build_system_prompt,
     new_memory,
+    resume,
 )
 from wenhui.agent.table import TABLE_NAME, build_query_table
 from wenhui.agent.tools import QueryLedger
@@ -416,6 +418,245 @@ def test_模型什么都没答时说清楚(settings):
 
     assert out.error
     assert "没有给出回答" in out.error
+
+
+# --------------------------------------------------------------------------
+# "动手先问" —— 停下来等人点头
+# --------------------------------------------------------------------------
+#
+# 下面这几条用的都是**真的** build_agent（不 monkeypatch），所以它们验的是
+# 整个中断/恢复回路真的接对了：中间件装上了没有、中断内容取出来了没有、
+# 用户点完能不能接着往下走。
+#
+# 特别注意 test_点同意它才真的跑 里悄悄发生的一件事：``resume`` 内部**又造了一个
+# 全新的 agent**（Streamlit 每次重画都会把一切重建），它能接着上次的中断走，
+# 靠的是两次共用同一份 memory。这一条不成立的话，用户点完按钮就会从头再来。
+
+
+def _client_with(model, **kwargs) -> LLMClient:
+    """造一个客户端，但把里面的模型换成假的。**一次网络都不发。**"""
+    client = LLMClient(LLMSettings(), "sk-fake", **kwargs)
+    client._model = model          # 绕过懒加载，直接塞进去
+    return client
+
+
+def _rerun_call(reason="用户要求重新汇总"):
+    return _ai(tool_calls=[{
+        "name": RERUN_TOOL_NAME,
+        "args": {"reason": reason},
+        "id": "call-rerun",
+        "type": "tool_call",
+    }])
+
+
+def _actions(tmp_path, dry_run=True):
+    from wenhui.agent.chat import ActionContext
+    from wenhui.store import Store
+
+    sink = ActionSink()
+    ctx = ActionContext(sink=sink, store=Store(tmp_path / "t.db"), dry_run=dry_run)
+    return ctx, sink
+
+
+@pytest.fixture()
+def no_real_merge(monkeypatch):
+    """重跑汇总不真的去读收件箱。**读文件、建表那些是 test_pipeline 的事。**"""
+    import wenhui.pipeline as pipeline
+
+    class _Result:
+        records = ["甲", "乙", "丙"]
+        issues = ["缺了个日期"]
+
+    monkeypatch.setattr(pipeline, "run", lambda **kw: _Result())
+    monkeypatch.setattr(pipeline, "find_template", lambda: None)
+
+
+def test_说重新汇总时会停下来问(settings, tmp_path):
+    """**"动手先问"的核心：它停住了，而且一次都没动。**
+
+    如果只是"停下来"但工具已经跑了，那这个保险是假的——
+    用户点的那个"同意"变成了一个事后通知。
+    """
+    ctx, sink = _actions(tmp_path)
+    client = _client_with(_scripted_model([_rerun_call(), _ai(content="已经重新汇总好了。")]))
+
+    out = ask(settings, client, _table(), "重新汇总一下", new_memory(),
+              QueryLedger(), actions=ctx)
+
+    assert out.waiting, "它没有停下来问"
+    assert out.error == ""            # ★ 不能报成"AI 没有给出回答"
+    assert out.answer == ""           # 还没做事，当然没有答案
+    assert sink.ran is False          # ★ 工具一次都没跑
+    assert out.pending[0].name == RERUN_TOOL_NAME
+    # 用户要靠这个判断"它到底想干什么"，取不到的话界面就只能干说一句"它想做事"
+    assert "重新汇总" in out.pending[0].args["reason"]
+    assert out.usage_uncounted is False   # 别误报"费用被低估"
+
+
+def test_点同意它才真的跑(settings, tmp_path, no_real_merge):
+    """点了「好，照做」→ 工具真的执行，新结果交回界面。"""
+    ctx, sink = _actions(tmp_path)
+    memory = new_memory()
+    client = _client_with(_scripted_model([
+        _rerun_call(),
+        _ai(content="好的，已经重新汇总完了，一共 3 条记录。"),
+    ]))
+
+    ask(settings, client, _table(), "重新汇总一下", memory, QueryLedger(), actions=ctx)
+    assert sink.ran is False
+
+    out = resume(settings, client, _table(), memory,
+                 [{"type": "approve"}], QueryLedger(), actions=ctx)
+
+    assert sink.ran is True, "点了同意，工具却没跑"
+    assert sink.produced, "跑了但新结果没交回界面——屏幕上还是旧表"
+    assert "重新汇总完了" in out.answer
+    assert not out.waiting
+
+
+def test_点先别动它一次都不跑(settings, tmp_path, no_real_merge):
+    """点了「先别动」→ 工具一次都不执行，助手接着说人话。
+
+    **这条比"点同意"更重要**：拒绝之后要是它还是跑了，
+    用户就再也不会相信那两个按钮了。
+    """
+    ctx, sink = _actions(tmp_path)
+    memory = new_memory()
+    client = _client_with(_scripted_model([
+        _rerun_call(),
+        _ai(content="好的，那就不动了。"),
+    ]))
+
+    ask(settings, client, _table(), "重新汇总一下", memory, QueryLedger(), actions=ctx)
+    out = resume(settings, client, _table(), memory,
+                 [{"type": "reject", "message": "先别动，我只是问问"}],
+                 QueryLedger(), actions=ctx)
+
+    assert sink.ran is False, "用户说了先别动，工具还是跑了"
+    assert sink.produced is False
+    assert out.answer, "拒绝了之后助手应该接着说句话，不能一片空白"
+    assert not out.waiting
+
+
+def test_答复条数对不上时不往用户脸上扔堆栈(settings, tmp_path, no_real_merge):
+    """框架对条数是**硬校验**的（实测会抛 ``ValueError``）。
+
+    真抛出来的话，用户看到一整页红色堆栈，而他只是点了个按钮。
+    界面那边是"按待批动作的个数生成答复"，本来就对得上；
+    这一条是万一哪天改坏了，兜住别炸。
+    """
+    ctx, _ = _actions(tmp_path)
+    memory = new_memory()
+    client = _client_with(_scripted_model([_rerun_call(), _ai(content="好")]))
+    ask(settings, client, _table(), "重新汇总一下", memory, QueryLedger(), actions=ctx)
+
+    out = resume(settings, client, _table(), memory, [], QueryLedger(), actions=ctx)
+    assert out.error
+    assert not out.waiting
+
+
+def test_上一件事没答复时不会被默默吞掉(settings, tmp_path, no_real_merge):
+    """**真机上验出来的一个坑。**
+
+    中断还挂着的时候再问一句，框架**不报错**——它把消息收进状态、
+    然后原地又回到那个中断上。用户看到的是"我问了它，它不理我"，
+    而且没有任何东西能告诉他为什么。
+
+    界面那边有栏杆挡着（有待批动作时不给输入框）。这一条验的是栏杆万一
+    被拆了，装配层也得把话说明白，而不是把人晾在那儿。
+    """
+    ctx, _ = _actions(tmp_path)
+    memory = new_memory()
+    client = _client_with(_scripted_model([_rerun_call(), _ai(content="好")]))
+
+    ask(settings, client, _table(), "重新汇总一下", memory, QueryLedger(), actions=ctx)
+
+    out = ask(settings, client, _table(), "一共有多少人？", memory,
+              QueryLedger(), actions=ctx)
+
+    assert out.error, "新问题被吞了——用户会以为它坏了"
+    assert "答复" in out.error
+    # 不要在这儿再画一张卡片：上一张还在对话记录里挂着，画两张用户会看晕
+    assert not out.waiting
+
+
+def test_没有动手能力时上面那道检查不误伤(settings):
+    """不传 ``actions`` 的助手压根不会停下来等人。
+
+    这时候要是把"检查有没有晾着的动作"也做了，等于每问一句都去翻一次
+    记忆——翻出点什么就误报，把正常提问堵死。
+    """
+    client = _client_with(_scripted_model([_ai(content="一共 3 人。")]))
+    out = ask(settings, client, _table(), "一共多少人", new_memory())
+    assert out.error == ""
+    assert out.answer == "一共 3 人。"
+
+
+def test_不给动手能力时根本造不出动手工具(settings, monkeypatch):
+    """不传 ``actions`` 的助手**只会查、不会动**——工具压根不存在，
+    模型想调也调不到。这是个有用的降级：不想让它动手就别传。"""
+    import wenhui.agent.chat as chat
+
+    built: list = []
+    monkeypatch.setattr(chat, "build_rerun_tool", lambda *a, **kw: built.append(1))
+    client = _client_with(_scripted_model([_ai(content="好")]))
+    chat.build_agent(settings, client, _table(), QueryLedger(), new_memory())
+    assert built == []
+
+
+def test_给了动手能力就会把它造出来并装上保险(settings, monkeypatch, tmp_path):
+    import wenhui.agent.chat as chat
+
+    built: list = []
+    # 换成一个**真的工具对象**：假件必须长着 ``.name``，
+    # 因为紧接着那行断言就是靠它去核对保险装没装上的。
+    monkeypatch.setattr(
+        chat, "build_rerun_tool", lambda *a, **kw: built.append(1) or _stub_tool()
+    )
+    client = _client_with(_scripted_model([_ai(content="好")]))
+    ctx, _ = _actions(tmp_path)
+    chat.build_agent(settings, client, _table(), QueryLedger(), new_memory(), ctx)
+    assert built == [1]
+
+
+def _stub_tool():
+    from langchain_core.tools import tool
+
+    @tool(RERUN_TOOL_NAME, description="假的，只为了有名字和参数")
+    def stub(reason: str) -> str:
+        return "假的"
+
+    return stub
+
+
+def test_忘了装保险会被当场拦住(settings):
+    """**"先装保险，再给枪上子弹"的机械化版本。**
+
+    漏装的后果是静默的：工具照跑，只是不再问用户。所以这里必须**当场**炸，
+    而不是等某天它不问自取地把用户的表重跑了一遍。
+    """
+    from wenhui.agent import chat
+
+    with pytest.raises(RuntimeError, match="停下来问用户"):
+        chat._assert_all_actions_gated([RERUN_TOOL_NAME], {})
+
+    # 只读的工具不需要保险——它改不坏任何东西，拦它只会让用户每问一句点一次同意
+    chat._assert_all_actions_gated(["query_records"], {})
+
+
+def test_中断内容缺胳膊少腿也认得出来(settings):
+    """这段跑在"模型已经返回、界面还没画"之间，抛异常的话用户看到的是白屏。"""
+    from wenhui.agent.chat import _pending_actions
+
+    assert _pending_actions({}) == []
+    assert _pending_actions({"__interrupt__": []}) == []
+    assert _pending_actions({"__interrupt__": [object()]}) == []
+    assert _pending_actions({"__interrupt__": [{"value": {"action_requests": [None]}}]}) == []
+    # args 不是字典（框架换版本了）也不能炸
+    got = _pending_actions({
+        "__interrupt__": [{"value": {"action_requests": [{"name": "x", "args": "乱码"}]}}]
+    })
+    assert got[0].name == "x" and got[0].args == {}
 
 
 # --------------------------------------------------------------------------

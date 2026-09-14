@@ -235,6 +235,31 @@ class Store:
             row = conn.execute("SELECT COALESCE(SUM(cost_cny), 0) AS total FROM runs").fetchone()
             return float(row["total"])
 
+    def last_paid_run(self) -> tuple[int, float] | None:
+        """最近一次**真花了钱**的汇总：(处理了几个文件, 花了多少)。没花过就返回 ``None``。
+
+        存在的理由：助手要重跑汇总时会停下来问用户，那个"停下来"的卡片上
+        得告诉他**这一下大概要花多少**。没有这个数，那个"好，照做"的按钮
+        就是在让他闭着眼睛签字。
+
+        为什么可以拿"上次"当"这次"的预估：汇总的花费基本只跟**文件数和列数**
+        有关，同样的收件箱再跑一遍，价格是同一个量级。
+
+        **为什么要把 ``cost_cny = 0`` 的那些排除掉**："不花钱试跑"也会在
+        ``runs`` 表里留一行（它照样读了文件、写了总表），但花费是 0。
+        不过滤的话，用户刚试跑完再让助手重跑，卡片上会写"上次花了 ¥0.0000"——
+        等于告诉了他一个假数，比不说还糟。
+        """
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT n_files, cost_cny FROM runs "
+                " WHERE cost_cny > 0 AND finished_at IS NOT NULL "
+                " ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row["n_files"]), float(row["cost_cny"])
+
     # ---------------------------------------------------------------- 问答花费
 
     def record_query(self, question: str, cost_cny: float, n_turns: int = 0) -> int:
