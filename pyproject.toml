@@ -2,7 +2,7 @@
 name = "wenhui"
 version = "0.1.0"
 description = "文汇 · 高校材料汇总系统 —— 把 N 份格式不一的下级 Excel 自动合并成一张总表"
-readme = "read.md"
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     # AI 层：用户指定 LangChain；langchain-openai 可直连任何 OpenAI 兼容端点
